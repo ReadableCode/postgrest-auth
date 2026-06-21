@@ -1,0 +1,13 @@
+[project]
+name = "postgrest-auth"
+version = "0.1.0"
+description = "Shared, app-agnostic JWT auth service for PostgREST (one per server, not per app)."
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pyjwt",
+    "bcrypt",
+    "psycopg2-binary",
+    "pydantic",
+]
