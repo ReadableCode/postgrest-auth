@@ -1,0 +1,33 @@
+# Shared auth service: permanent infrastructure like PostgREST — added ONCE,
+# not per app. App-agnostic: POST /token with {schema, username, password};
+# it looks up <schema>.users, verifies the bcrypt hash, and returns a JWT
+# whose `role` claim is "<schema>_user" and `user_id` claim is the user id,
+# signed with the same POSTGREST_JWT_SECRET that PostgREST validates against.
+# POSTGRES_DB is the single database PostgREST serves (all app schemas live
+# in it). Proxied at https://auth.tinkernet.me.
+#
+# Pulled into Docker/docker_compose_projects.yaml via `include:`; the include
+# entry sets project_directory to this repo's root, so `context: .` is the
+# repo root and the ${VARS} below interpolate from this repo's .env (a
+# symlink to personal_credentials/personal.env, deployed by the
+# personal_manifest.yaml entry). depends_on postgres resolves in the merged
+# compose model — postgres stays defined in the central file.
+services:
+  auth:
+    image: postgrest_auth_image
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: auth
+    environment:
+      POSTGRES_URL: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: apps
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      JWT_SECRET: ${POSTGREST_JWT_SECRET}
+    depends_on:
+      - postgres
+    ports:
+      - "8006:8000"
+    restart: unless-stopped

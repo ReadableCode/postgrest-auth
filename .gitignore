@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 .DS_Store
+# machine-local symlink -> personal_credentials/personal.env (deployed by
+# personal_credentials/personal_manifest.yaml); never commit env files
+.env
