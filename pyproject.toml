@@ -11,3 +11,13 @@ dependencies = [
     "psycopg2-binary",
     "pydantic",
 ]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "httpx",
+]
+
+[tool.pytest.ini_options]
+# main.py lives at the repo root (single-file service); put it on the path
+pythonpath = ["."]

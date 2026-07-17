@@ -32,6 +32,25 @@ The JWT (HS256, signed with `JWT_SECRET`) carries:
 
 `GET /health` → `{"status": "ok"}`.
 
+## Hardening
+
+This endpoint faces the internet directly (no Authelia in front of
+`auth.tinkernet.me`), so it regulates itself — the same posture Sync_Plex and
+Book-Bot ship in-app (see `security.py`):
+
+- **Lockout**: 5 failed logins inside 15 minutes locks that key for 15 minutes,
+  tracked per-username (`user:<schema>:<name>`) **and** per-client-IP. Locked
+  requests get `429` with a human-readable `detail`. In-memory; resets on
+  container restart.
+- **Client IP**: first `X-Forwarded-For` hop (SWAG sets it; server-side callers
+  like load-log's Streamlit container forward their viewer's IP in the same
+  header), falling back to the socket peer.
+- **No user enumeration**: unknown usernames verify against a dummy bcrypt hash
+  so rejects cost the same either way, and the `401` body is identical.
+- **Security headers** on every response; TLS/HSTS stay at the SWAG proxy.
+
+Tests: `uv run pytest` (mocks the DB lookup; no Postgres needed).
+
 ## Why shared
 
 The auth call is plain HTTP, so it works identically from a Streamlit app, a TUI,
