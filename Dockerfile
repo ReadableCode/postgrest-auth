@@ -13,7 +13,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 COPY pyproject.toml ./
 RUN uv sync --no-dev
 
-COPY main.py ./
+COPY main.py security.py ./
 
 EXPOSE 8000
 
