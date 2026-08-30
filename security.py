@@ -8,8 +8,16 @@ lives here (and every app that logs in through it inherits it):
     per-client-IP; 5 failures inside 15 minutes locks that key for 15
     minutes (mirrors Authelia's regulation block). In-memory is fine for
     a single uvicorn process; it resets on restart.
-  - a dummy bcrypt hash so login costs the same for unknown users as for
-    wrong passwords (no user enumeration by timing).
+  - a dummy argon2id hash so login costs the same for unknown users as
+    for wrong passwords (no user enumeration by timing).
+
+Password hashing: argon2id is the standard. Stored hashes are
+self-identifying by prefix, so bcrypt hashes from before the argon2id
+migration still verify ($2b$ → bcrypt) and are transparently rehashed to
+argon2id on the next successful login — nobody resets a password. Until a
+legacy user logs in once, their reject path pays bcrypt cost instead of
+argon2 cost; that only distinguishes "known bcrypt-era user" from
+"unknown user" and disappears as rehashes land.
 
 TLS still terminates at the SWAG proxy in front.
 """
@@ -18,16 +26,46 @@ import threading
 import time
 
 import bcrypt
+from argon2 import PasswordHasher
+from argon2.exceptions import InvalidHashError, VerificationError
 from fastapi import Request
 
 MAX_FAILURES = 5
 WINDOW_SECONDS = 15 * 60
 LOCKOUT_SECONDS = 15 * 60
 
+_hasher = PasswordHasher()
+
 # verified for unknown usernames so the reject path always pays the
-# bcrypt cost — never compare against it with a real password expecting
+# argon2 cost — never compare against it with a real password expecting
 # a match.
-DUMMY_HASH = bcrypt.hashpw(b"postgrest-auth-dummy-password", bcrypt.gensalt()).decode()
+DUMMY_HASH = _hasher.hash("postgrest-auth-dummy-password")
+
+
+# %% Password hashing
+def verify_password(password: str, stored_hash: str) -> bool:
+    """Prefix-dispatched verify: $2* → bcrypt (legacy), else argon2id."""
+    if stored_hash.startswith("$2"):
+        try:
+            return bcrypt.checkpw(password.encode(), stored_hash.encode())
+        except ValueError:
+            return False
+    try:
+        _hasher.verify(stored_hash, password)
+        return True
+    except (VerificationError, InvalidHashError):
+        return False
+
+
+def needs_rehash(stored_hash: str) -> bool:
+    """True for bcrypt (migrate to argon2id) or outdated argon2 params."""
+    if not stored_hash.startswith("$argon2"):
+        return True
+    return _hasher.check_needs_rehash(stored_hash)
+
+
+def hash_password(password: str) -> str:
+    return _hasher.hash(password)
 
 
 # %% Client IP

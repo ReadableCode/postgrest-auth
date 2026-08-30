@@ -3,14 +3,20 @@ import datetime
 import os
 import re
 
-import bcrypt
 import jwt
 import psycopg2
 from psycopg2 import sql
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, Field
 
-from security import DUMMY_HASH, LoginRateLimiter, client_ip
+from security import (
+    DUMMY_HASH,
+    LoginRateLimiter,
+    client_ip,
+    hash_password,
+    needs_rehash,
+    verify_password,
+)
 
 # %% Configuration
 # Shared, app-agnostic auth service that sits alongside PostgREST. It is added
@@ -24,6 +30,7 @@ POSTGRES_USER = os.environ["POSTGRES_USER"]
 POSTGRES_PASSWORD = os.environ["POSTGRES_PASSWORD"]
 JWT_SECRET = os.environ["JWT_SECRET"]
 JWT_TTL_HOURS = int(os.environ.get("JWT_TTL_HOURS", "24"))
+MAX_TTL_HOURS = 720  # 30 days — the longest session any app runs
 
 # A request's schema picks both the users table ("<schema>.users") and the role
 # claim ("<schema>_user"). It is interpolated into SQL as an identifier, so it
@@ -60,15 +67,17 @@ class TokenRequest(BaseModel):
     schema_: str = Field(alias="schema")
     username: str
     password: str
+    # Session policy belongs to the calling app (Solitaire runs 30-day
+    # sessions, load-log is fine with the default). Clamped to MAX_TTL_HOURS.
+    ttl_hours: int | None = None
 
     model_config = {"populate_by_name": True}
 
 
-# %% DB lookup
-def fetch_user(schema: str, username: str) -> tuple | None:
-    """(id, password_hash) for the username in <schema>.users, or None."""
+# %% DB access
+def _connect():
     try:
-        conn = psycopg2.connect(
+        return psycopg2.connect(
             host=POSTGRES_URL,
             port=POSTGRES_PORT,
             dbname=POSTGRES_DB,
@@ -78,17 +87,45 @@ def fetch_user(schema: str, username: str) -> tuple | None:
     except psycopg2.Error:
         raise HTTPException(status_code=503, detail="Database unavailable")
 
+
+def fetch_user(schema: str, username: str) -> tuple | None:
+    """(id, username, password_hash, role, disabled) from <schema>.users,
+    or None. The username comes back in its stored casing so token claims
+    are canonical."""
+    conn = _connect()
     try:
         with conn, conn.cursor() as cur:
             query = sql.SQL(
-                "SELECT id, password_hash FROM {}.users WHERE username = %s"
+                "SELECT id, username, password_hash, role, disabled "
+                "FROM {}.users WHERE username = %s"
             ).format(sql.Identifier(schema))
             cur.execute(query, (username,))
             return cur.fetchone()
     except psycopg2.errors.UndefinedTable:
         raise HTTPException(status_code=400, detail="Unknown schema")
+    except psycopg2.errors.UndefinedColumn:
+        # The app's users table predates the standard shape (role, disabled,
+        # password_changed_at — see README). Its additive migration must land
+        # before this service serves it.
+        raise HTTPException(status_code=503, detail="users table not migrated")
     except psycopg2.Error:
         raise HTTPException(status_code=503, detail="Database error")
+    finally:
+        conn.close()
+
+
+def update_password_hash(schema: str, user_id, new_hash: str) -> None:
+    """Transparent rehash to argon2id after a successful legacy verify.
+    Deliberately does NOT touch password_changed_at — the password didn't
+    change, so existing sessions must survive. Best-effort: the caller
+    ignores failures and the next login retries."""
+    conn = _connect()
+    try:
+        with conn, conn.cursor() as cur:
+            query = sql.SQL(
+                "UPDATE {}.users SET password_hash = %s WHERE id = %s"
+            ).format(sql.Identifier(schema))
+            cur.execute(query, (new_hash, user_id))
     finally:
         conn.close()
 
@@ -116,22 +153,33 @@ def token(req: TokenRequest, request: Request):
     row = fetch_user(schema, req.username)
 
     # Unknown usernames verify against a dummy hash so the reject path
-    # always pays the bcrypt cost (no user enumeration by timing), and the
-    # 401 reads the same either way.
+    # always pays the KDF cost (no user enumeration by timing), and the
+    # 401 reads the same either way. Disabled accounts also pay the cost
+    # and reject identically.
     if row:
-        ok = bcrypt.checkpw(req.password.encode(), row[1].encode())
+        ok = verify_password(req.password, row[2]) and not row[4]
     else:
-        bcrypt.checkpw(req.password.encode(), DUMMY_HASH.encode())
+        verify_password(req.password, DUMMY_HASH)
         ok = False
     if not ok:
         login_limiter.record_failure(*keys)
         raise HTTPException(status_code=401, detail="Invalid credentials")
     login_limiter.record_success(*keys)
 
+    if needs_rehash(row[2]):
+        try:
+            update_password_hash(schema, row[0], hash_password(req.password))
+        except (HTTPException, psycopg2.Error):
+            pass
+
+    ttl = min(req.ttl_hours, MAX_TTL_HOURS) if req.ttl_hours else JWT_TTL_HOURS
+    now = datetime.datetime.now(datetime.timezone.utc)
     payload = {
         "role": f"{schema}_user",
         "user_id": str(row[0]),
-        "exp": datetime.datetime.now(datetime.timezone.utc)
-        + datetime.timedelta(hours=JWT_TTL_HOURS),
+        "username": row[1],
+        "app_role": row[3],
+        "iat": now,
+        "exp": now + datetime.timedelta(hours=max(ttl, 1)),
     }
     return {"token": jwt.encode(payload, JWT_SECRET, algorithm="HS256")}

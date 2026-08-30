@@ -8,6 +8,7 @@ dependencies = [
     "uvicorn[standard]",
     "pyjwt",
     "bcrypt",
+    "argon2-cffi",
     "psycopg2-binary",
     "pydantic",
 ]

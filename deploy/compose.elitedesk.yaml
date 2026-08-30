@@ -1,7 +1,8 @@
 # Shared auth service: permanent infrastructure like PostgREST — added ONCE,
 # not per app. App-agnostic: POST /token with {schema, username, password};
-# it looks up <schema>.users, verifies the bcrypt hash, and returns a JWT
-# whose `role` claim is "<schema>_user" and `user_id` claim is the user id,
+# it looks up <schema>.users, verifies the hash (argon2id standard, legacy
+# bcrypt rehashed on login), and returns a JWT whose `role` claim is
+# "<schema>_user" and `user_id` claim is the user id,
 # signed with the same POSTGREST_JWT_SECRET that PostgREST validates against.
 # POSTGRES_DB is the single database PostgREST serves (all app schemas live
 # in it). Proxied at https://auth.tinkernet.me.
